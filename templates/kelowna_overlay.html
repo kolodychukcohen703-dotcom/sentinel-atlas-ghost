@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sentinel Atlas — Kelowna Command Map</title>
+<link rel="stylesheet" href="{{ url_for('kelowna.static',filename='kelowna.css') }}">
+<link rel="stylesheet" href="{{ url_for('kelowna.static',filename='atlas-nav.css') }}">
+<link rel="stylesheet" href="{{ url_for('kelowna.static',filename='atlas-builder.css') }}">
+<link rel="stylesheet" href="{{ url_for('kelowna.static',filename='journey.css') }}">
+</head>
+<body>
+<header>
+  <div><h1>✶ SENTINEL ATLAS // KELOWNA + CAD + GIS + NETWORK</h1>
+  <small>Real downloaded map → blueprint rerender → Sentinel layers → Parallel Kelowna</small></div>
+  <div class="atlas-links"><a href="/">🌍 Living World</a><a href="/kelowna/kiosk">◉ Kiosk</a><a href="http://127.0.0.1:5011/" target="_blank" rel="noopener">👻 Ghost Collaboration</a></div><div id="mapStatus">MAP CACHE</div>
+</header>
+
+<div class="tabs">
+  <label class="mode-picker">OPEN TOOL <select id="atlasModeSelect"><option value="cad">CAD / GIS MAP</option><option value="journey">PERPETUAL JOURNEY</option><option value="parallel">PARALLEL KELOWNA</option><option value="addressbuild">HOME / BUILDING DESIGNER</option><option value="worldbuilder">WORLD BUILDER</option><option value="street">STREET VIEW</option><option value="network">NETWORK</option><option value="sanctuary">SANCTUARY POD</option></select></label>
+  <button class="tab active" data-mode="cad">CAD / GIS</button>
+  <button class="tab" data-mode="journey">PERPETUAL JOURNEY</button>
+  <button class="tab" data-mode="network">NETWORK</button>
+  <button class="tab" data-mode="parallel">PARALLEL KELOWNA</button>
+  <button class="tab" data-mode="street">STREET VIEW</button><button class="tab" data-mode="addressbuild">ADDRESS BUILD</button><button class="tab" data-mode="worldbuilder">BUILD WORLD</button><button class="tab" data-mode="sanctuary">SANCTUARY POD</button>
+</div>
+
+<main>
+  <section class="drawing">
+    <div class="cadbar"><span>MODEL</span><span id="cursor">X 0.00 Y 0.00</span><span>SNAP 1m</span><span>ORTHO</span>
+<span class="cadzoom"><button id="cadZoomOut">−</button><span id="cadZoomLabel">100%</span><button id="cadZoomIn">＋</button><button id="cadZoomExtents">Extents</button></span></div>
+    <svg id="canvas" viewBox="0 0 1200 800" role="img" aria-label="Kelowna blueprint map">
+      <g id="gWater"></g><g id="gLanduse"></g><g id="gRoads"></g><g id="gPaths"></g>
+      <g id="gRail"></g><g id="gBuildings"></g><g id="gTransit"></g><g id="gTraffic"></g><g id="gAmenities"></g>
+      <g id="gNetPhysical"></g><g id="gNetLogical"></g><g id="gWifi"></g><g id="gPbx"></g>
+      <g id="gSentinel"></g>
+    </svg>
+    <div id="parallel" hidden>
+      <div class="parallel-grid"></div>
+      <div class="parallel-command"><strong>PARALLEL KELOWNA</strong><select id="parallelPreset"><option value="downtown">Downtown Sanctuary</option><option value="mccurdy">130 McCurdy District</option><option value="lakeside">Lakeside Village</option><option value="forest">Forest Refuge</option><option value="blank">Blank District</option></select><button id="loadParallelPreset">Load Preset</button><span id="parallelStatus">Choose a place, then click an object.</span></div>
+      <button data-parallel-action="building" style="left:15%;top:22%">⌂ BUILD A HOME</button>
+      <button data-parallel-action="pbx" style="left:60%;top:22%">☎ PBX TERMINAL</button>
+      <button data-parallel-action="interior" style="left:33%;top:50%">▦ DESIGN INTERIOR</button>
+      <button data-parallel-action="character" style="left:70%;top:52%">☻ CHARACTER</button>
+      <button data-parallel-action="notes" style="left:18%;top:72%">✎ PLACE NOTE</button>
+      <button data-parallel-action="world" style="left:56%;top:74%">◇ OPEN WORLD BUILDER</button>
+    </div>
+
+
+    <div id="worldBuilder" hidden>
+      <div class="world-builder-stage">
+        <div class="world-toolbar"><strong>WORLD GENERATOR</strong><span id="worldSummary">Choose a generator preset.</span></div>
+        <div id="worldPreview"><div class="world-grid"></div><div id="worldObjects"></div></div>
+      </div>
+    </div>
+    <div id="journey" hidden>
+      <div class="tour-stage"><canvas id="journeyCanvas" width="1200" height="760"></canvas><div id="openTourDeck" class="open-tour-deck"><img id="tourBack" alt="Previous open street image"><img id="tourFront" alt="Current open street image"><div id="tourFallback">OPEN MAP PROJECTION<br><small>No open street photograph at this point</small></div><div id="tourCredit">Open imagery: Panoramax federation</div></div></div>
+      <div class="journey-hud"><strong id="journeyPhase">READY</strong><span id="journeyPosition">Enter a start and destination.</span><span id="journeyProgress">0%</span></div>
+      <div id="journeyEvent" class="journey-event">The route projection will test directions, walk, enter symbolic doors and climb symbolic stairs.</div>
+    </div>
+    <div id="addressBuild" hidden>
+      <div class="address-build-wrap">
+        <div class="blueprint-stage">
+          <svg id="addressBlueprint" viewBox="0 0 900 620" aria-label="Address blueprint">
+            <defs>
+              <pattern id="smallGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+                <path d="M20 0H0V20" fill="none" stroke="currentColor" stroke-opacity=".12" stroke-width="1"/>
+              </pattern>
+              <pattern id="bigGrid" width="100" height="100" patternUnits="userSpaceOnUse">
+                <rect width="100" height="100" fill="url(#smallGrid)"/>
+                <path d="M100 0H0V100" fill="none" stroke="currentColor" stroke-opacity=".28" stroke-width="1"/>
+              </pattern>
+            </defs>
+            <rect width="900" height="620" fill="url(#bigGrid)"/>
+            <g id="addressPlan"></g>
+            <g id="manualPlan"></g>
+          </svg>
+          <div class="blueprint-tools" id="blueprintTools"><button data-draw-tool="select">↖ Select</button><button class="active" data-draw-tool="wall">／ Wall</button><button data-draw-tool="room">▭ Room</button><button data-draw-tool="door">🚪 Door</button><button data-draw-tool="window">▣ Window</button><button data-draw-tool="erase">⌫ Erase</button><button id="blueprintUndo">Undo</button><button id="blueprintClear">Clear</button></div>
+          <div class="blueprint-hint" id="blueprintHint">Wall tool: click a start point, then click an end point.</div>
+        </div>
+        <div class="three-stage">
+          <canvas id="structure3d" width="900" height="620"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div id="sanctuary" hidden>
+      <div class="sanctuary-head"><strong>✦ SENTINEL SANCTUARY POD</strong><span id="sanctuaryRoomLabel">Unlinked room</span></div>
+      <div class="sanctuary-stage"><canvas id="sanctuaryCanvas" width="1100" height="690"></canvas></div>
+      <div class="sanctuary-tools" id="sanctuaryTools">
+        <button data-sanctuary-tool="door">🚪 Door</button><button data-sanctuary-tool="window">▣ Window</button>
+        <button data-sanctuary-tool="vent">≋ Vent</button><button data-sanctuary-tool="sensor">◉ Sensor</button>
+        <button data-sanctuary-tool="light">✦ Light</button><button data-sanctuary-tool="focus">◇ Focus</button>
+        <button data-sanctuary-tool="erase">⌫ Erase</button><button id="sanctuaryRotate">Rotate</button>
+      </div>
+    </div>
+
+    <div id="street" hidden>
+      <div id="streetViewCanvas"></div>
+      <div id="streetOverlay">
+        <div class="street-head"><strong>REAL KELOWNA STREET VIEW</strong><span id="streetStatus">waiting</span></div>
+        <div class="street-actions">
+          <button id="streetDowntown">Downtown</button>
+          <button id="streetQueensway">Queensway</button>
+          <button id="streetMission">Mission</button>
+          <button id="dropStreetPin">📍 Drop Pin Here</button>
+          <button id="toggleStreetPins">◉ Pins On/Off</button>
+          <button id="enterParallel">🚪 Enter Parallel Kelowna</button>
+        </div>
+      </div>
+      <div id="streetNoKey" class="placeholder" hidden>
+        GOOGLE_MAPS_API_KEY is not configured.<br>
+        <small>Copy .env.example to .env and add your key locally.</small>
+      </div>
+    </div>
+  </section>
+
+  <aside>
+    <section class="panel">
+      <h2>Map Source</h2>
+      <button id="refreshMap">Download / Refresh Kelowna OSM</button>
+      <div id="sourceInfo" class="muted"></div>
+    </section>
+
+    <section class="panel">
+      <h2>CAD / GIS Layers</h2>
+      <div id="layers"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Network Layers</h2>
+      <div id="netLayers"></div>
+      <div class="palette">
+        <button data-net="router">Router</button><button data-net="switch">Switch</button>
+        <button data-net="wifi_ap">Wi‑Fi AP</button><button data-net="pbx">PBX</button>
+        <button data-net="kiosk">Kiosk</button><button data-net="server">Server</button>
+        <button data-net="fibre">Fibre Route</button><button data-net="conduit">Conduit</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Network Setup</h2>
+      <label>Name<input id="netName" value="New Network Node"></label>
+      <label>Type<select id="netType"><option>router</option><option>switch</option><option>wifi_ap</option><option>pbx</option><option>kiosk</option><option>server</option></select></label>
+      <label>Address<input id="netAddress" placeholder="10.10.0.10"></label>
+      <label>PBX extension<input id="netExt" placeholder="6105"></label>
+      <label>VLAN / group<input id="netVlan" placeholder="10"></label>
+      <label>SSID<input id="netSsid" placeholder="SENTINEL"></label>
+      <button id="addNetNode">Place Logical Node</button>
+    </section>
+
+    <section class="panel">
+      <h2>Link Builder</h2>
+      <label>From<select id="linkA"></select></label>
+      <label>To<select id="linkB"></select></label>
+      <label>Link type<select id="linkType"><option>ethernet</option><option>fibre</option><option>wifi</option><option>sip</option><option>pbx-trunk</option><option>conduit</option></select></label>
+      <label>Capacity<input id="capacity" placeholder="1G / 10G / SIP"></label>
+      <button id="addLink">Create Link</button>
+    </section>
+  
+    <section class="panel" id="streetAnnotationPanel">
+      <h2>Street View Pin / Object</h2>
+      <label>Type<select id="annType">
+        <option value="note">Note</option>
+        <option value="instruction">Instruction</option>
+        <option value="doorway">Sentinel Doorway</option>
+        <option value="pbx">PBX Terminal</option>
+        <option value="object">Interactive Object</option>
+        <option value="waypoint">Waypoint</option>
+        <option value="task">Task</option>
+        <option value="warning">Warning</option>
+        <option value="character">Character</option>
+      </select></label>
+      <label>Title<input id="annTitle" value="Sentinel Point of Interest"></label>
+      <label>Note<textarea id="annNote" rows="3" placeholder="What is this place or object?"></textarea></label>
+      <label>Instructions<textarea id="annInstructions" rows="3" placeholder="What should someone do here?"></textarea></label>
+      <label>Action<select id="annAction">
+        <option value="inspect">Inspect</option><option value="enter_world">Enter World</option>
+        <option value="pbx">Call PBX</option><option value="open_note">Open Note</option>
+        <option value="task">Start Task</option><option value="talk">Talk</option>
+      </select></label>
+      <label>Target / extension / world<input id="annTarget" placeholder="6101 or parallel-downtown"></label>
+      <button id="saveStreetPin">Save Pin at Current Street View</button>
+      <div id="annPosition" class="muted">Move Street View to the point of interest.</div>
+      <div id="annotationList"></div>
+    </section>
+
+
+    <section class="panel" id="addressBuildPanel">
+      <h2>Address Build / 3D Structure</h2>
+      <label>Quick home preset<select id="buildingPreset"><option value="custom">Custom / keep drawing</option><option value="cabin">Small Cabin</option><option value="bungalow">Two Bedroom Bungalow</option><option value="sanctuary">Sanctuary Home</option><option value="shop">Shop with Apartment</option><option value="courtyard">Courtyard Home</option></select></label>
+      <button id="applyBuildingPreset">Load Building Preset</button>
+      <label>Address
+        <input id="buildAddress" placeholder="Enter a Kelowna address">
+      </label>
+      <div class="actions"><button id="findAddress">Find Address</button><button id="loadMcCurdy">Load 130 McCurdy Rd</button></div>
+      <div id="geocodeResult" class="muted">Enable Geocoding API for address lookup.</div>
+
+      <label>Project name<input id="buildName" value="Sentinel Address Build"></label>
+      <label>Width (m)<input id="buildWidth" type="number" min="2" step=".5" value="12"></label>
+      <label>Depth (m)<input id="buildDepth" type="number" min="2" step=".5" value="10"></label>
+      <label>Floors<input id="buildFloors" type="number" min="1" max="20" value="2"></label>
+      <label>Floor height (m)<input id="buildFloorHeight" type="number" min="2" max="8" step=".1" value="3"></label>
+      <label>Rotation (deg)<input id="buildRotation" type="number" step="5" value="0"></label>
+      <label>Roof
+        <select id="buildRoof">
+          <option value="flat">Flat</option>
+          <option value="gable">Gable</option>
+          <option value="hip">Hip</option>
+        </select>
+      </label>
+      <label>Notes<textarea id="buildNotes" rows="3" placeholder="Rooms, materials, purpose, instructions..."></textarea></label>
+      <div class="actions">
+        <button id="generateBlueprint">Generate Blueprint</button>
+        <button id="renderStructure">Render 3D</button>
+        <button id="renderDrawnStructure">Render My Drawing in 3D</button>
+        <button id="saveBuildProject">Save Project</button>
+      </div>
+      <div id="buildProjectList"></div>
+    </section>
+
+
+<section class="panel" id="worldBuilderPanel">
+<h2>Build World Generator</h2>
+<label>Level<select id="worldLevel"><option value="beginner">Beginner</option><option value="medium">Medium</option><option value="advanced">Advanced</option><option value="custom">Custom</option></select></label>
+<label>World type<select id="worldType"><option>city</option><option>suburb</option><option>village</option><option>industrial</option><option>campus</option><option>fantasy</option><option>sci-fi</option><option>wilderness</option><option>mixed</option></select></label>
+<label>Map size<select id="worldSize"><option value="small">Small</option><option value="medium" selected>Medium</option><option value="large">Large</option><option value="huge">Huge</option></select></label>
+<label>Terrain<select id="worldTerrain"><option>Flat</option><option>Rolling</option><option>Mountain</option><option>Lakefront</option><option>River</option></select></label>
+<label>Road layout<select id="worldRoads"><option>Grid</option><option>Organic</option><option>Radial</option><option>Highway Spine</option><option>Minimal</option></select></label>
+<label>Density<select id="worldDensity"><option>Low</option><option selected>Medium</option><option>High</option><option>Very High</option></select></label>
+<label>Buildings<select id="worldBuildings"><option>Residential</option><option>Commercial</option><option>Mixed Use</option><option>Skyscrapers</option><option>Industrial</option><option>Mixed</option></select></label>
+<label>Population / NPCs<input id="worldPopulation" type="number" value="120"></label>
+<label>Wildlife<input id="worldWildlife" type="number" value="30"></label>
+<label>PBX / network nodes<input id="worldNetworkNodes" type="number" value="8"></label>
+<label class="check"><input id="worldInteriors" type="checkbox" checked> Generate interiors</label>
+<label class="check"><input id="worldTransit" type="checkbox" checked> Transit stops</label>
+<label class="check"><input id="worldStreetView" type="checkbox" checked> Street-view portals</label>
+<div class="actions"><button id="generateWorld">Generate World</button><button id="randomizeWorld">Randomize</button><button id="worldFromMcCurdy">World Around 130 McCurdy</button></div>
+<div id="worldPresetInfo" class="muted"></div>
+</section>
+
+<section class="panel" id="journeyPanel">
+<h2>Perpetual Journey Simulator</h2>
+<label>Journey preset<select id="journeyPreset"><option value="downtown-home">Downtown Kelowna → 130 McCurdy</option><option value="custom">Custom coordinates</option></select></label>
+<div class="journey-grid"><label>Start latitude<input id="journeyStartLat" type="number" step=".000001" value="49.887900"></label><label>Start longitude<input id="journeyStartLon" type="number" step=".000001" value="-119.496000"></label><label>Destination latitude<input id="journeyEndLat" type="number" step=".000001" placeholder="Use address lookup"></label><label>Destination longitude<input id="journeyEndLon" type="number" step=".000001" placeholder="Use address lookup"></label></div>
+<label>Destination address<input id="journeyAddress" value="130 McCurdy Rd, Kelowna, BC"></label>
+<label>Paste Street View link or coordinates<textarea id="journeyStreetPaste" rows="3" placeholder="Paste a Google Street View URL or 49.8879, -119.4960"></textarea></label>
+<div class="actions"><button id="journeyUsePaste">Use Paste as Destination</button><button id="journeyGeocode">Find Address</button><button id="journeyStart">Start Perpetual Loop</button><button id="journeyPause">Pause</button><button id="journeyReset">Reset</button></div>
+<div class="actions"><button id="journeyOpenStreet">Open Current Point in Street View</button><button id="journeySnapshot">Save Current Street View Snapshot</button><button id="journeyKartaView">Open KartaView Coverage</button></div>
+<div id="journeySnapshotStatus" class="muted">Snapshots save inside data/streetview_snapshots.</div>
+<label>Projection style<select id="journeyStyle"><option value="balanced">Balanced route</option><option value="explore">Try more possible directions</option><option value="direct">Direct route</option></select></label>
+<label>Motion speed<input id="journeySpeed" type="range" min="1" max="10" value="4"></label>
+<label class="check"><input id="journeyLoop" type="checkbox" checked> Return home and repeat perpetually</label>
+<label class="check"><input id="journeyAutoSnapshot" type="checkbox"> Save one automatic snapshot at destination and one at home</label>
+<label class="check"><input id="journeyDoors" type="checkbox" checked> Simulate opening doors / entering buildings</label>
+<label class="check"><input id="journeyStairs" type="checkbox" checked> Simulate stairs and floor changes</label>
+<h2>Guardian Instructions <span class="sim-badge guardian-badge">SIMULATION</span></h2>
+<label>Instruction<textarea id="guardianTourInstruction" rows="3" placeholder="Example: At the destination, pause, announce arrival, and record a peaceful perimeter check."></textarea></label>
+<div class="actions"><button id="guardianTourAdd">Add Instruction</button><button id="guardianTourClear">Clear Instructions</button></div>
+<div id="guardianTourQueue" class="guardian-tour-log"></div>
+<h2>Tour Mission Log</h2><div id="guardianTourLog" class="guardian-tour-log"></div>
+<div class="muted">Visual planning simulation only. It does not track your live position or control real doors, buildings, or devices.</div>
+</section>
+
+<section class="panel" id="sanctuaryPanel">
+<h2>Sanctuary Room + Routine</h2>
+<label>Linked CAD building<select id="sanctuaryBuilding"><option value="">Independent room</option></select></label>
+<label>Room name<input id="sanctuaryRoomName" value="Sanctuary Room"></label>
+<div class="sanctuary-dims"><label>Width (m)<input id="sanctuaryWidth" type="number" min="3" max="20" value="7"></label><label>Depth (m)<input id="sanctuaryDepth" type="number" min="3" max="20" value="6"></label></div>
+<button id="saveSanctuaryRoom">Save / Update Room</button>
+<h2>Invisible Sentinel Guardian Team <span class="sim-badge guardian-badge">SYMBOLIC</span></h2>
+<label>Team size<select id="guardianTeamSize"><option value="1">1 Guardian</option><option value="2">2 Guardians</option><option value="3" selected>3 Guardians</option><option value="4">4 Guardians</option></select></label>
+<div class="guardian-commands">
+  <button data-guardian-command="observe">◉ Observe</button><button data-guardian-command="protect">⬡ Protect</button>
+  <button data-guardian-command="escort">→ Escort Out</button><button data-guardian-command="seal">▣ Seal Doorway</button>
+  <button data-guardian-command="bless">✦ Bless Room</button><button data-guardian-command="standdown">○ Stand Down</button>
+</div>
+<button id="guardianSweep" class="sanctuary-primary">Begin Peaceful Room Sweep</button>
+<div id="guardianMissionStatus" class="sanctuary-status">Symbolic simulation ready. No physical surveillance or real-world control.</div>
+<div id="guardianMissionLog" class="guardian-log"></div>
+<label>Routine name<input id="sanctuaryRoutineName" value="Peaceful Room Blessing"></label>
+<label>Spoken blessing or prayer<textarea id="sanctuaryBlessing" rows="4">May this room be filled with peace, safety, kindness, and rest. May every person who enters be treated with dignity and care.</textarea></label>
+<div class="sanctuary-options"><label class="check"><input id="sanctuaryUseLight" type="checkbox" checked> Calming light</label><label class="check"><input id="sanctuaryUseVoice" type="checkbox" checked> Spoken blessing</label><label class="check"><input id="sanctuaryUseTone" type="checkbox" checked> Gentle tone</label><label class="check"><input id="sanctuaryUseVent" type="checkbox" checked> Air check</label></div>
+<label>Tone<select id="sanctuaryTone"><option value="174">174 Hz — low</option><option value="285">285 Hz — warm</option><option value="396">396 Hz — grounded</option><option value="432" selected>432 Hz — gentle</option><option value="528">528 Hz — bright</option></select></label>
+<label>Duration<select id="sanctuaryDuration"><option value="30">30 seconds</option><option value="60" selected>1 minute</option><option value="180">3 minutes</option><option value="300">5 minutes</option></select></label>
+<div class="actions"><button id="beginSanctuary" class="sanctuary-primary">Begin Routine</button><button id="stopSanctuary" disabled>Stop Effects</button></div>
+<div id="sanctuaryRoutineStatus" class="sanctuary-status">Ready.</div>
+<h2>Environmental Sensors <span class="sim-badge">SIMULATED</span></h2>
+<div id="sanctuarySensors" class="sensor-grid"></div><div id="sanctuaryAirAdvice" class="sanctuary-status"></div>
+</section>
+</aside>
+</main>
+
+<script>window.SENTINEL_GOOGLE_MAPS_API_KEY={{ google_maps_api_key|tojson }};</script>
+{% if google_maps_api_key %}
+<script async defer src="https://maps.googleapis.com/maps/api/js?key={{ google_maps_api_key|e }}&callback=sentinelInitGoogleMaps"></script>
+{% endif %}
+<script src="{{ url_for('kelowna.static',filename='kelowna.js') }}"></script>
+<script src="{{ url_for('kelowna.static',filename='sanctuary.js') }}"></script>
+<script src="{{ url_for('kelowna.static',filename='atlas-builder.js') }}"></script>
+<script src="{{ url_for('kelowna.static',filename='journey.js') }}"></script>
+</body>
+</html>

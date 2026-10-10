@@ -1,0 +1,14 @@
+{
+  "source": "OpenStreetMap contributors",
+  "license": "ODbL 1.0",
+  "url": "https://www.openstreetmap.org/",
+  "download_url": "https://api.openstreetmap.org/api/0.6/map?bbox=-119.51,49.875,-119.48,49.9",
+  "bbox": [
+    -119.51,
+    49.875,
+    -119.48,
+    49.9
+  ],
+  "downloaded_at": 1791614434,
+  "features": 4921
+}

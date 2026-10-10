@@ -1,0 +1,5 @@
+#top{background:linear-gradient(90deg,#071523,#143a38,#071523);box-shadow:0 0 28px #2dd4bf33}
+.atlas-nav,.atlas-links{margin-left:auto;display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.atlas-nav a,.atlas-links a{color:#b9ffe7;text-decoration:none;border:1px solid #2c8c72;border-radius:999px;padding:7px 10px;background:#08251d;white-space:nowrap}
+.atlas-nav a:hover,.atlas-nav a.active,.atlas-links a:hover{background:#145943;color:white;border-color:#5eead4;box-shadow:0 0 14px #2dd4bf55}
+@media(max-width:1050px){#top>span{display:none}.atlas-nav a{font-size:12px;padding:6px 8px}}

@@ -1,0 +1,1 @@
+import { SentinelWorld } from './world.js';import { SentinelUI } from './ui.js';window.SentinelWorld=SentinelWorld;window.SentinelUI=SentinelUI;SentinelWorld.init();SentinelUI.listWorlds();SentinelUI.addMsg('bot','Phase 16 ready. Type !stars, !planet, or load a world.');

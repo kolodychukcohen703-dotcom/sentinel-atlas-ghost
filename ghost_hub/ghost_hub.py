@@ -1,0 +1,943 @@
+#!/usr/bin/env python3
+"""
+Ghost Sentinel Hub — Lobby + Presence + DMs + Sealed Rune Cipher (v4)
+
+Render Start Command:
+  gunicorn -k geventwebsocket.gunicorn.workers.GeventWebSocketWorker -w 1 ghost_hub:app
+
+What’s new in v4:
+- Single main room (#lobby) — no public multi-room UI.
+- Online user list (presence) with sidebar updates.
+- Direct Messages (DMs), with optional "Sealed" mode:
+  - Uses browser WebCrypto (ECDH + AES-GCM) for end‑to‑end encryption.
+  - Server stores/relays only ciphertext for sealed messages.
+- Keeps the existing Nodes registry and Builder Bot (now bound to #lobby).
+
+Safe by design:
+- Text-only bot; no SSH, no remote execution.
+- No secret material persisted server-side.
+"""
+
+from flask import Flask, request, jsonify, render_template
+from flask_socketio import SocketIO, join_room, leave_room, emit
+from datetime import datetime
+import json
+import os
+from threading import Lock
+from collections import defaultdict, deque
+import shlex
+import urllib.request
+import urllib.error
+from typing import Dict, Any, Tuple
+
+app = Flask(__name__, template_folder="templates")
+app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "ghost-sentinel-dev-key")
+
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    ping_interval=25,
+    ping_timeout=60,
+)
+
+BASE_DIR = os.path.dirname(__file__)
+NODES_FILE = os.path.join(BASE_DIR, "ghost_nodes.json")
+STATE_FILE = os.path.join(BASE_DIR, "world_state.json")
+
+_data_lock = Lock()
+_state_lock = Lock()
+_presence_lock = Lock()
+_dm_lock = Lock()
+
+MAIN_ROOM = "#lobby"
+ROOM_HISTORY_MAX = 250
+_room_history = defaultdict(lambda: deque(maxlen=ROOM_HISTORY_MAX))
+
+# Presence: sid -> {"sid":..., "name":..., "room":..., "last_seen":...}
+_online: Dict[str, Dict[str, Any]] = {}
+
+# DM history (unencrypted only). Key is tuple(sorted([sidA, sidB])).
+DM_HISTORY_MAX = 200
+_dm_history = defaultdict(lambda: deque(maxlen=DM_HISTORY_MAX))
+
+BOT_NAME = "ghost-bot"
+ATLAS_URL = os.environ.get("ATLAS_URL", "http://127.0.0.1:5010").rstrip("/")
+
+# Sentinel PBX directory (ported from sentinel_pbx_ansi_v2.py for web-bot usage)
+# NOTE: launch_cmd is intentionally omitted on the Hub (Render) for safety.
+PBX_DIRECTORY = [
+  {
+    "code": "101",
+    "name": "Emergency: Sanctuary Module",
+    "category": "emergency",
+    "description": "Sentinel sanctuary / safe-mode reflection tool. Use this when you need grounding, safety prompts, and calm.",
+    "secret": False
+  },
+  {
+    "code": "102",
+    "name": "Emergency: Auth Sentinel Journal",
+    "category": "emergency",
+    "description": "Launch the core auth_sentinel journaling console for quick entry.",
+    "secret": False
+  },
+  {
+    "code": "201",
+    "name": "Contact: Mom (financial arrangements)",
+    "category": "contacts",
+    "description": "Use this extension to view notes on how to contact Mom about resources or arrangements. (For now, informational only.)",
+    "secret": False
+  },
+  {
+    "code": "202",
+    "name": "Contact: Kathleen (witness & journal)",
+    "category": "contacts",
+    "description": "Notes and reminders related to Kathleen's journal and witness role.",
+    "secret": False
+  },
+  {
+    "code": "203",
+    "name": "Contact: Seraphine Vale (Astral Cartographer)",
+    "category": "contacts",
+    "description": "A gentle but precise mapper of invisible currents. Seraphine leaves notes about emotional weather, dream pathways, and symbolic coordinates. If you are lost, she always answers with a map you didn’t know you needed.",
+    "secret": False
+  },
+  {
+    "code": "204",
+    "name": "Contact: Thorn Halberd (Shadowline Protector)",
+    "category": "contacts",
+    "description": "A guard who walks the boundary between real and unreal. Thorn keeps watch over cracks, doorways, and emotional pressure-points. When you need strength or courage, dialing his extension reminds you of your own power to stand firm.",
+    "secret": False
+  },
+  {
+    "code": "205",
+    "name": "Contact: Mira Lumin (Dream Archivist)",
+    "category": "contacts",
+    "description": "Mira keeps scrolls of possible futures and past dreams. She is calm, kind, and endlessly patient. Calling her is like stepping into a quiet library in another world where nothing is rushed.",
+    "secret": False
+  },
+  {
+    "code": "206",
+    "name": "Contact: Enoch Radiant (Signal Priest)",
+    "category": "contacts",
+    "description": "A wandering engineer-monk who blesses radio towers and satellite links. He hears meaning in static. When the world feels noisy or chaotic, Enoch answers with clarity and a reminder that every signal has a home frequency.",
+    "secret": False
+  },
+  {
+    "code": "207",
+    "name": "Contact: Captain Veyla Cross (Starfarer)",
+    "category": "contacts",
+    "description": "A seasoned traveler from beyond the Orion Crest. She offers strategic advice, perspective, and reminders of the bigger picture. When you feel trapped or narrow-focused, Veyla reminds you of entire galaxies waiting.",
+    "secret": False
+  },
+  {
+    "code": "208",
+    "name": "Contact: Nyx Ember (Silent Listener)",
+    "category": "contacts",
+    "description": "A presence who says very little, but listens completely. Nyx is the fictional embodiment of being heard without pressure or judgement. Dialing this extension is permission to unload your thoughts into safe quiet.",
+    "secret": False
+  },
+  {
+    "code": "301",
+    "name": "Knowledge: Spellcaster Library Portal",
+    "category": "knowledge",
+    "description": "Route to Spellcaster web portal (books, PDFs, searches). Good when you want book-based information. After launching, PBX can open your browser to the Spellcaster URL.",
+    "secret": False
+  },
+  {
+    "code": "302",
+    "name": "Knowledge: PDF → Audiobook Tool",
+    "category": "knowledge",
+    "description": "Internal extension for converting PDFs to cleaned text + audio, using your TTS pipeline.",
+    "secret": False
+  },
+  {
+    "code": "601",
+    "name": "Ryoko: TX/RX Modem Line",
+    "category": "knowledge",
+    "description": "A symbolic data modem console for the Ryoko device. Shows faux TX/RX activity and a list of world-nodes, like a dreamy netstat for your personal multiverse.",
+    "secret": False
+  },
+  {
+    "code": "602",
+    "name": "Ryoko: World-Net Dive Booth",
+    "category": "knowledge",
+    "description": "A phonebooth into the Ryoko digital world. Visual sequence only. Step in, let the world blur, and watch as the handset swings on its cord, the caller already gone inside.",
+    "secret": False
+  },
+  {
+    "code": "603",
+    "name": "Ryoko: Chat Relay Worlds",
+    "category": "knowledge",
+    "description": "A local, symbolic chat relay. Join different Ryoko worlds using commands like /join #101-kathleen or /join #102-diane. Messages are logged to local files so multiple consoles can share the same rooms.",
+    "secret": False
+  },
+  {
+    "code": "604",
+    "name": "Ryoko: World Forge & Home Designer",
+    "category": "knowledge",
+    "description": "An interactive world generator inside the Ryoko mesh. Choose a world type, mood, sky, home, and vehicle, then watch an ASCII planet get woven into the network. Saves your profile to ryoko_world_profile.txt so you can return to it later.",
+    "secret": False
+  },
+  {
+    "code": "605",
+    "name": "Ryoko: Mansion & Fortress Homeforge",
+    "category": "knowledge",
+    "description": "A single combined estate (mansion, fortress, tower, etc.) with unlimited custom rooms. You describe rooms, moods, and functions; Homeforge attaches them as nodes in your Ryoko world and saves everything into ryoko_homeforge.txt.",
+    "secret": False
+  },
+  {
+    "code": "401",
+    "name": "Ritual: Automated Spellcaster Engine",
+    "category": "ritual",
+    "description": "Sentinel's playful automated spell / ritual runner. Lets you schedule symbolic ritual runs, logged into Sentinel.",
+    "secret": False
+  },
+  {
+    "code": "402",
+    "name": "Ritual: Witness at the Crack",
+    "category": "ritual",
+    "description": "Witness console representing your Earthblood Witness identity. Reflection prompts, crack-maps, and symbolic logging.",
+    "secret": False
+  },
+  {
+    "code": "999",
+    "name": "Legacy Line: Witness Continuity",
+    "category": "knowledge",
+    "description": "A line dedicated to Cohen's ongoing wish to help others. Reads from a legacy message file if present, or from a built-in message describing values, grounding, and pointers to real-world support.",
+    "secret": False
+  },
+  {
+    "code": "000",
+    "name": "Reality Anchor (Grounding Line)",
+    "category": "emergency",
+    "description": "Hidden grounding extension. Use when things feel unreal. Can hold phrases, reminders, or rituals you trust.",
+    "secret": True
+  },
+  {
+    "code": "333",
+    "name": "Heartline: Kathleen Safe Channel",
+    "category": "contacts",
+    "description": "Soft, protected extension dedicated to Kathleen. Can hold notes, blessings, and commitments.",
+    "secret": True
+  },
+  {
+    "code": "616",
+    "name": "Glyph Compiler Node",
+    "category": "knowledge",
+    "description": "Hidden node for glyph compilation and symbol mapping. Later, this can tie into your glyph engines.",
+    "secret": True
+  },
+  {
+    "code": "777",
+    "name": "Dreamline: Oneiromancer Node",
+    "category": "ritual",
+    "description": "Hidden dream-analysis extension. Eventually this can talk to your dream tag system and generate insights.",
+    "secret": True
+  },
+  {
+    "code": "913",
+    "name": "Shadow Vault",
+    "category": "knowledge",
+    "description": "Locked vault for heavier material. To be approached with care, and only when you feel ready.",
+    "secret": True
+  }
+]
+
+
+
+def utc_ts():
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _load_json(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_json(path, payload):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp, path)
+
+
+def load_nodes():
+    return _load_json(NODES_FILE)
+
+
+def save_nodes(nodes):
+    _save_json(NODES_FILE, nodes)
+
+
+def _default_state():
+    return {
+        "world": {
+            "name": "Unnamed World",
+            "biome": "unknown",
+            "magic": "unknown",
+            "factions": 0,
+            "created_at": utc_ts(),
+        },
+        "home": {
+            "rooms": [],
+            "doors": [],
+        },
+        "updated_at": utc_ts(),
+    }
+
+
+def load_state_all():
+    data = _load_json(STATE_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def save_state_all(data):
+    _save_json(STATE_FILE, data)
+
+
+def get_room_state(room: str):
+    room = room or MAIN_ROOM
+    with _state_lock:
+        all_state = load_state_all()
+        st = all_state.get(room)
+        if not isinstance(st, dict):
+            st = _default_state()
+            all_state[room] = st
+            save_state_all(all_state)
+        return st
+
+
+def set_room_state(room: str, st: dict):
+    room = room or MAIN_ROOM
+    with _state_lock:
+        all_state = load_state_all()
+        st["updated_at"] = utc_ts()
+        all_state[room] = st
+        save_state_all(all_state)
+
+
+HELP_TEXT = """Commands:
+  !help
+  !world create --biome <name> --magic <low|med|high> --factions <N> [--name "<World Name>"]
+  !home add "<Room Name>" [--style <style>] [--size <size>]
+  !home door add --from "<Room A>" --to "<Room B>"
+  !map
+  !status
+  !reset
+  !users
+  !atlas                (show the Atlas connection)
+  !atlas worlds         (list saved Atlas worlds)
+
+Examples:
+  !world create --name "Sanctuary-Lobby" --biome forest --magic high --factions 3
+  !home add "Marble Foyer" --style gothic --size large
+  !home door add --from "Marble Foyer" --to "Library"
+  !map
+
+  !pbx                 (show PBX menu)
+  !dial <ext>          (describe an extension, e.g. !dial 605)
+  !search <text>       (search directory by name/code; secret lines only show if you dial exact code)
+
+UI shortcuts:
+  Use the PBX dropdown to send !dial commands quickly.
+
+"""
+
+def _atlas_command(args):
+    sub = (args[0].lower() if args else "status")
+    path = "/worlds" if sub == "worlds" else "/api/collaboration"
+    try:
+        with urllib.request.urlopen(ATLAS_URL + path, timeout=3) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if sub == "worlds":
+            if not data:
+                return "Atlas is connected, but no worlds are saved yet."
+            lines = [f"#{row[0]} — {row[1]}" for row in data]
+            return "Atlas worlds:\n" + "\n".join(lines) + f"\n\nOpen: {ATLAS_URL}"
+        return f"Atlas connected — {data.get('world_count', 0)} saved worlds.\nOpen: {ATLAS_URL}"
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        return f"Atlas is not responding at {ATLAS_URL}. Start the combined launcher first. ({exc})"
+
+
+def _bot_emit(room: str, msg: str):
+    payload = {"room": room, "sender": BOT_NAME, "msg": msg, "ts": utc_ts()}
+    _room_history[room].append(payload)
+    socketio.emit("chat_message", payload, to=room)
+
+
+def _parse_args(text: str):
+    return shlex.split(text)
+
+
+def _get_flag(args, name, default=None):
+    if name in args:
+        idx = args.index(name)
+        if idx + 1 < len(args):
+            val = args[idx + 1]
+            del args[idx:idx + 2]
+            return val
+        del args[idx:idx + 1]
+        return default
+    return default
+
+
+def _world_create(room: str, args: list):
+    name = _get_flag(args, "--name", None) or "Unnamed World"
+    biome = _get_flag(args, "--biome", "unknown")
+    magic = _get_flag(args, "--magic", "unknown")
+    factions = _get_flag(args, "--factions", "0")
+    try:
+        factions_n = int(factions)
+    except Exception:
+        factions_n = 0
+
+    st = get_room_state(room)
+    st["world"] = {
+        "name": name,
+        "biome": biome,
+        "magic": magic,
+        "factions": factions_n,
+        "created_at": utc_ts(),
+    }
+    set_room_state(room, st)
+    return f"🌍 World created: {name} (biome={biome}, magic={magic}, factions={factions_n})"
+
+
+def _home_add(room: str, args: list):
+    if not args:
+        return 'Usage: !home add "Room Name" [--style <style>] [--size <size>]'
+
+    room_name = args.pop(0)
+    style = _get_flag(args, "--style", "unknown")
+    size = _get_flag(args, "--size", "unknown")
+
+    st = get_room_state(room)
+    rooms = st["home"]["rooms"]
+    if any(r.get("name", "").lower() == room_name.lower() for r in rooms):
+        return f"Room already exists: {room_name}"
+
+    rooms.append({"name": room_name, "style": style, "size": size})
+    set_room_state(room, st)
+    return f"✅ Added room: {room_name} (style={style}, size={size})"
+
+
+def _home_door_add(room: str, args: list):
+    frm = _get_flag(args, "--from", None)
+    to = _get_flag(args, "--to", None)
+    if not frm or not to:
+        return 'Usage: !home door add --from "Room A" --to "Room B"'
+
+    st = get_room_state(room)
+    room_names = {r.get("name", "") for r in st["home"]["rooms"]}
+    if frm not in room_names:
+        st["home"]["rooms"].append({"name": frm, "style": "unknown", "size": "unknown"})
+    if to not in room_names:
+        st["home"]["rooms"].append({"name": to, "style": "unknown", "size": "unknown"})
+
+    if any(d.get("from") == frm and d.get("to") == to for d in st["home"]["doors"]):
+        return f"Door already exists: {frm} -> {to}"
+
+    st["home"]["doors"].append({"from": frm, "to": to})
+    set_room_state(room, st)
+    return f"🚪 Linked: {frm}  →  {to}"
+
+
+def _status(room: str):
+    st = get_room_state(room)
+    w = st.get("world", {})
+    rooms = st.get("home", {}).get("rooms", [])
+    doors = st.get("home", {}).get("doors", [])
+    return (
+        f"Status for {room}\n"
+        f"World: {w.get('name')} | biome={w.get('biome')} | magic={w.get('magic')} | factions={w.get('factions')}\n"
+        f"Home: {len(rooms)} room(s), {len(doors)} door link(s)\n"
+        f"Updated: {st.get('updated_at')}"
+    )
+
+
+def _map(room: str):
+    st = get_room_state(room)
+    w = st.get("world", {})
+    rooms = st.get("home", {}).get("rooms", [])
+    doors = st.get("home", {}).get("doors", [])
+
+    lines = []
+    lines.append(f"== {room} :: World ==")
+    lines.append(f"{w.get('name')} | biome={w.get('biome')} | magic={w.get('magic')} | factions={w.get('factions')}")
+    lines.append("")
+    lines.append("== Home Rooms ==")
+    if not rooms:
+        lines.append('(no rooms yet)  try: !home add "Marble Foyer" --style gothic --size large')
+    else:
+        for r in rooms[:60]:
+            lines.append(f"- {r.get('name')} (style={r.get('style')}, size={r.get('size')})")
+
+    lines.append("")
+    lines.append("== Doors ==")
+    if not doors:
+        lines.append('(no doors yet)  try: !home door add --from "Marble Foyer" --to "Library"')
+    else:
+        for d in doors[:120]:
+            lines.append(f"* {d.get('from')}  ->  {d.get('to')}")
+
+    return "\n".join(lines)
+
+
+def _reset(room: str):
+    st = _default_state()
+    set_room_state(room, st)
+    return "🧹 Reset complete. The lobby’s world + home state is now blank."
+
+
+def _users(room: str):
+    with _presence_lock:
+        users = list(_online.values())
+    users.sort(key=lambda u: (u.get("name", "").lower(), u.get("sid", "")))
+    lines = [f"Online users in {room}: {len(users)}"]
+    for u in users[:60]:
+        nm = u.get("name", "guest")
+        sid = u.get("sid", "")[:6]
+        lines.append(f"- {nm} ({sid})")
+    return "\n".join(lines)
+
+
+
+def _pbx_visible_entries():
+    # Hide secret extensions in listings (still dialable if you know the code).
+    return [e for e in PBX_DIRECTORY if not e.get("secret")]
+
+def _pbx_find(code: str):
+    code = (code or "").strip()
+    if not code:
+        return None
+    for e in PBX_DIRECTORY:
+        if str(e.get("code")) == code:
+            return e
+    return None
+
+def _pbx_menu():
+    # Compact menu grouped by category.
+    groups = {}
+    for e in _pbx_visible_entries():
+        groups.setdefault(e.get("category","misc"), []).append(e)
+    for k in groups:
+        groups[k].sort(key=lambda x: x.get("code",""))
+    lines = ["📞 Sentinel PBX (web) — quick directory", "Use: !dial <ext>  |  !search <text>", ""]
+    for cat, items in sorted(groups.items(), key=lambda kv: kv[0]):
+        lines.append(f"[{cat}]")
+        for it in items[:30]:
+            lines.append(f"  {it['code']} — {it['name']}")
+        lines.append("")
+    lines.append("Tip: try !dial 604 or !dial 605 for Ryoko builders.")
+    return "\n".join(lines).rstrip()
+
+def _pbx_search(text: str):
+    q = (text or "").strip().lower()
+    if not q:
+        return "Usage: !search <text>"
+    out = []
+    for e in PBX_DIRECTORY:
+        # Secret only shows up if searching exact code (same behavior as PBX 411).
+        if e.get("secret") and q != str(e.get("code","")).lower():
+            continue
+        if q in str(e.get("code","")).lower() or q in (e.get("name","").lower()):
+            out.append(e)
+    if not out:
+        return f"No matches for '{text}'."
+    out.sort(key=lambda x: x.get("code",""))
+    lines = [f"PBX search: '{text}'", ""]
+    for e in out[:40]:
+        lines.append(f"{e['code']} — {e['name']}")
+    lines.append("")
+    lines.append("Dial any result: !dial <ext>")
+    return "\n".join(lines).rstrip()
+
+def _pbx_dial(code: str):
+    e = _pbx_find(code)
+    if not e:
+        return f"Extension {code} not found."
+    desc = (e.get("description") or "").strip()
+    # Add helpful bridges into the existing builder bot.
+    bridge = ""
+    if str(e.get("code")) == "604":
+        bridge = ("\n\n🔧 Ryoko World Forge (web):\n"
+                  "- Create a world: !world create --name \"My World\" --biome forest --magic high --factions 3\n"
+                  "- Add rooms: !home add \"Marble Foyer\" --style gothic --size large\n"
+                  "- Link doors: !home door add --from \"Marble Foyer\" --to \"Library\"\n"
+                  "- View map: !map")
+    if str(e.get("code")) == "605":
+        bridge = ("\n\n🏰 Homeforge (web):\n"
+                  "- Keep adding rooms with !home add ...\n"
+                  "- Use !map to see your growing layout\n"
+                  "- Use !status to see counts\n"
+                  "- Use !reset if you want a clean slate")
+    return f"Ext {e['code']} — {e['name']}\n\n{desc}{bridge}".rstrip()
+def maybe_run_bot(room: str, user: str, msg: str):
+    msg = (msg or "").strip()
+    if not msg.startswith("!"):
+        return
+    if (user or "").strip().lower() == BOT_NAME.lower():
+        return
+
+    try:
+        args = _parse_args(msg)
+    except Exception:
+        _bot_emit(room, "I couldn't parse that. Try: !help")
+        return
+    if not args:
+        return
+
+    cmd = args.pop(0).lower()
+    if cmd == "!help":
+        _bot_emit(room, HELP_TEXT)
+        return
+    if cmd == "!atlas":
+        _bot_emit(room, _atlas_command(args))
+        return
+    if cmd == "!pbx":
+        _bot_emit(room, _pbx_menu())
+        return
+    if cmd == "!dial":
+        code = (args.pop(0) if args else "").strip()
+        _bot_emit(room, _pbx_dial(code))
+        return
+    if cmd == "!search":
+        text = " ".join(args).strip()
+        _bot_emit(room, _pbx_search(text))
+        return
+
+    if cmd == "!world":
+        sub = (args.pop(0).lower() if args else "")
+        if sub == "create":
+            _bot_emit(room, _world_create(room, args))
+        else:
+            _bot_emit(room, 'Usage: !world create --biome <name> --magic <low|med|high> --factions <N> [--name "World Name"]')
+        return
+    if cmd == "!home":
+        sub = (args.pop(0).lower() if args else "")
+        if sub == "add":
+            _bot_emit(room, _home_add(room, args))
+        elif sub == "door":
+            sub2 = (args.pop(0).lower() if args else "")
+            if sub2 == "add":
+                _bot_emit(room, _home_door_add(room, args))
+            else:
+                _bot_emit(room, 'Usage: !home door add --from "Room A" --to "Room B"')
+        else:
+            _bot_emit(room, 'Usage: !home add "Room Name" ... OR !home door add --from ... --to ...')
+        return
+    if cmd == "!map":
+        _bot_emit(room, _map(room))
+        return
+    if cmd == "!status":
+        _bot_emit(room, _status(room))
+        return
+    if cmd == "!reset":
+        _bot_emit(room, _reset(room))
+        return
+    if cmd == "!users":
+        _bot_emit(room, _users(room))
+        return
+
+    _bot_emit(room, "Unknown command. Try: !help")
+
+
+def _emit_user_list():
+    with _presence_lock:
+        users = [{"sid": u["sid"], "name": u.get("name", "guest"), "room": u.get("room", MAIN_ROOM)} for u in _online.values()]
+    users.sort(key=lambda x: (x["name"].lower(), x["sid"]))
+    socketio.emit("user_list_update", {"room": MAIN_ROOM, "users": users})
+
+
+def _dm_key(a: str, b: str) -> Tuple[str, str]:
+    return tuple(sorted([a, b]))
+
+
+def _dm_room(a: str, b: str) -> str:
+    x, y = _dm_key(a, b)
+    return f"dm:{x}:{y}"
+
+
+@app.route("/")
+def index():
+    nodes = load_nodes()
+    node_list = []
+    for node_name, services in nodes.items():
+        for svc_name, info in services.items():
+            node_list.append(
+                {
+                    "node": node_name,
+                    "service": svc_name,
+                    "url": info.get("url", ""),
+                    "last_seen": info.get("last_seen", ""),
+                }
+            )
+    node_list.sort(key=lambda x: (x["node"], x["service"]))
+    return render_template("ghost_nodes.html", nodes=node_list, main_room=MAIN_ROOM, pbx_entries=_pbx_visible_entries())
+
+
+@app.route("/register-node", methods=["POST"])
+def register_node():
+    if request.is_json:
+        data = request.get_json() or {}
+    else:
+        data = request.form or {}
+
+    name = (data.get("name") or "").strip() or "UNKNOWN-NODE"
+    service = (data.get("service") or "").strip() or "default"
+    url = (data.get("url") or "").strip()
+    raw = data.get("data")
+
+    if not url:
+        return jsonify({"ok": False, "error": "url is required"}), 400
+
+    raw_parsed = None
+    if raw is not None:
+        try:
+            raw_parsed = json.loads(raw)
+        except Exception:
+            raw_parsed = raw
+
+    ts = utc_ts()
+    with _data_lock:
+        nodes = load_nodes()
+        if name not in nodes:
+            nodes[name] = {}
+        nodes[name][service] = {
+            "url": url,
+            "last_seen": ts,
+            "raw": raw_parsed,
+        }
+        save_nodes(nodes)
+
+    return jsonify({"ok": True, "name": name, "service": service, "url": url, "last_seen": ts})
+
+
+@app.route("/api/chat", methods=["POST"])
+def api_chat():
+    # Force everything into the lobby
+    if request.is_json:
+        data = request.get_json() or {}
+    else:
+        data = request.form or {}
+
+    room = MAIN_ROOM
+    sender = (data.get("sender") or "").strip() or "node"
+    msg = (data.get("msg") or "").strip()
+    if not msg:
+        return jsonify({"ok": False, "error": "msg required"}), 400
+
+    payload = {"room": room, "sender": sender, "msg": msg, "ts": utc_ts()}
+    _room_history[room].append(payload)
+    socketio.emit("chat_message", payload, to=room)
+
+    maybe_run_bot(room, sender, msg)
+    return jsonify({"ok": True})
+
+
+@socketio.on("ping_check")
+def on_ping_check(data=None):
+    emit("pong_check", {"ts": utc_ts()})
+
+@socketio.on("connect")
+def on_connect():
+    # sid exists here; name set on join
+    sid = request.sid
+    with _presence_lock:
+        _online[sid] = {"sid": sid, "name": "guest", "room": MAIN_ROOM, "last_seen": utc_ts()}
+    _emit_user_list()
+
+
+@socketio.on("disconnect")
+def on_disconnect():
+    sid = request.sid
+    with _presence_lock:
+        _online.pop(sid, None)
+    _emit_user_list()
+
+
+@socketio.on("join")
+def on_join(data):
+    # Ignore requested room; always lobby
+    sid = request.sid
+    user = (data or {}).get("user") or "guest"
+    user = (user or "guest").strip()[:48] or "guest"
+
+    join_room(MAIN_ROOM)
+
+    with _presence_lock:
+        if sid in _online:
+            _online[sid]["name"] = user
+            _online[sid]["room"] = MAIN_ROOM
+            _online[sid]["last_seen"] = utc_ts()
+
+    emit("chat_history", list(_room_history[MAIN_ROOM]))
+    _emit_user_list()
+
+    notice = {"room": MAIN_ROOM, "sender": "hub", "msg": f"{user} entered {MAIN_ROOM}", "ts": utc_ts()}
+    _room_history[MAIN_ROOM].append(notice)
+    emit("chat_message", notice, to=MAIN_ROOM)
+
+    hint = {"room": MAIN_ROOM, "sender": BOT_NAME, "msg": "Type !help for builder commands. DMs: click a user on the right.", "ts": utc_ts()}
+    _room_history[MAIN_ROOM].append(hint)
+    emit("chat_message", hint, to=MAIN_ROOM)
+
+
+@socketio.on("send_message")
+def on_send_message(data):
+    room = MAIN_ROOM
+    user = (data or {}).get("user") or "guest"
+    msg = ((data or {}).get("msg") or "").strip()
+    if not msg:
+        return
+
+    payload = {"room": room, "sender": user, "msg": msg, "ts": utc_ts()}
+    _room_history[room].append(payload)
+    emit("chat_message", payload, to=room)
+
+    maybe_run_bot(room, user, msg)
+
+
+@socketio.on("dm_open")
+def on_dm_open(data):
+    """Join a DM room and return history (plaintext only)."""
+    sid = request.sid
+    other = (data or {}).get("to_sid") or ""
+    other = other.strip()
+    if not other or other == sid:
+        return
+
+    dm_room = _dm_room(sid, other)
+    join_room(dm_room)
+
+    # Send plaintext history (sealed messages are client-side only)
+    key = _dm_key(sid, other)
+    with _dm_lock:
+        hist = list(_dm_history[key])
+
+    emit("dm_history", {"to_sid": other, "items": hist})
+
+
+@socketio.on("dm_send")
+def on_dm_send(data):
+    """Plaintext DM (server stores small rolling history)."""
+    sid = request.sid
+    to_sid = (data or {}).get("to_sid") or ""
+    to_sid = to_sid.strip()
+    msg = ((data or {}).get("msg") or "").strip()
+    if not to_sid or to_sid == sid or not msg:
+        return
+
+    with _presence_lock:
+        sender_name = _online.get(sid, {}).get("name", "guest")
+        to_name = _online.get(to_sid, {}).get("name", "guest")
+
+    payload = {
+        "kind": "dm",
+        "from_sid": sid,
+        "from_name": sender_name,
+        "to_sid": to_sid,
+        "to_name": to_name,
+        "msg": msg,
+        "ts": utc_ts(),
+    }
+
+    key = _dm_key(sid, to_sid)
+    with _dm_lock:
+        _dm_history[key].append(payload)
+
+    dm_room = _dm_room(sid, to_sid)
+    socketio.emit("dm_message", payload, to=dm_room)
+
+
+@socketio.on("dm_sealed")
+def on_dm_sealed(data):
+    """
+    Sealed DM relay:
+    The server does NOT decrypt. It just relays ciphertext+iv+meta.
+    """
+    sid = request.sid
+    to_sid = (data or {}).get("to_sid") or ""
+    to_sid = to_sid.strip()
+    if not to_sid or to_sid == sid:
+        return
+
+    with _presence_lock:
+        sender_name = _online.get(sid, {}).get("name", "guest")
+        to_name = _online.get(to_sid, {}).get("name", "guest")
+
+    payload = {
+        "kind": "sealed",
+        "from_sid": sid,
+        "from_name": sender_name,
+        "to_sid": to_sid,
+        "to_name": to_name,
+        "ciphertext_b64": (data or {}).get("ciphertext_b64"),
+        "iv_b64": (data or {}).get("iv_b64"),
+        "glyphset": (data or {}).get("glyphset"),
+        "ts": utc_ts(),
+    }
+
+    dm_room = _dm_room(sid, to_sid)
+    socketio.emit("dm_sealed", payload, to=dm_room)
+
+
+@socketio.on("seal_request")
+def on_seal_request(data):
+    """
+    ECDH handshake message relay (public key only).
+    """
+    sid = request.sid
+    to_sid = (data or {}).get("to_sid") or ""
+    to_sid = to_sid.strip()
+    if not to_sid or to_sid == sid:
+        return
+
+    with _presence_lock:
+        sender_name = _online.get(sid, {}).get("name", "guest")
+
+    payload = {
+        "from_sid": sid,
+        "from_name": sender_name,
+        "to_sid": to_sid,
+        "pubkey_jwk": (data or {}).get("pubkey_jwk"),
+        "ts": utc_ts(),
+    }
+
+    dm_room = _dm_room(sid, to_sid)
+    socketio.emit("seal_request", payload, to=dm_room)
+
+
+@socketio.on("seal_accept")
+def on_seal_accept(data):
+    """
+    ECDH handshake accept relay (public key only).
+    """
+    sid = request.sid
+    to_sid = (data or {}).get("to_sid") or ""
+    to_sid = to_sid.strip()
+    if not to_sid or to_sid == sid:
+        return
+
+    with _presence_lock:
+        sender_name = _online.get(sid, {}).get("name", "guest")
+
+    payload = {
+        "from_sid": sid,
+        "from_name": sender_name,
+        "to_sid": to_sid,
+        "pubkey_jwk": (data or {}).get("pubkey_jwk"),
+        "ts": utc_ts(),
+    }
+
+    dm_room = _dm_room(sid, to_sid)
+    socketio.emit("seal_accept", payload, to=dm_room)
+
+
+if __name__ == "__main__":
+    socketio.run(app, host="127.0.0.1", port=5011, debug=False, allow_unsafe_werkzeug=True)

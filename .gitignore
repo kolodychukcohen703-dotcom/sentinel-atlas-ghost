@@ -1,0 +1,8 @@
+.env
+.venv/
+.testvenv/
+__pycache__/
+*.pyc
+data/streetview_snapshots/
+ghost_hub/ghost_nodes.json
+ghost_hub/world_state.json

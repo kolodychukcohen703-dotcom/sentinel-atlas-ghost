@@ -74,3 +74,4 @@ surveillance.
   above.
 - On Linux, `python3-venv` may need to be installed once by your system package
   manager.
+# sentinel-atlas-ghost
